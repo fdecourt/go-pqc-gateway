@@ -1,0 +1,68 @@
+# secret, clé, token : sa ne part jamais dans le depot
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.cer
+id_rsa*
+id_ed25519*
+.infisical*
+
+# binaire compilé, sa se reconstruit
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/pq-server
+/server
+
+# resultat de test, couverture et profilage
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+profile.out
+
+# dependance et cache local
+vendor/
+.cache/
+
+# fichier d'editeur et de IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+.#*
+
+# saleté crée par les systeme d'exploitation
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# log et fichier temporaire
+*.log
+tmp/
+temp/
+scratch/
+
+# la doc reste en local, elle est jamais publié
+docs/

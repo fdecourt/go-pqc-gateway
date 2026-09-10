@@ -1,0 +1,5 @@
+go test fuzz v1
+string("000=")
+string("\r\r\r\r\r\r\r\r\r\r\r\r\r\r")
+string(" ")
+string("0")

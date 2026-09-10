@@ -1,0 +1,4 @@
+go test fuzz v1
+string("0")
+string("10.00,10.00,10.00,00.,00.")
+bool(true)

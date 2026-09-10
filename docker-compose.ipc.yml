@@ -1,0 +1,56 @@
+# Exemple d'architecture haute sécurité IPC par Unix Domain Socket (Zéro réseau TCP)
+# Les conteneurs communiquent via un volume temporaire partagé en mémoire vive (tmpfs).
+# Aucun port réseau exposé, aucune trame sniffable, aucune interaction avec /var/run/docker.sock.
+
+services:
+  pq-crypto-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pq-crypto-service:0.0.1
+    container_name: pq-crypto-microservice
+    restart: unless-stopped
+    # Note : Aucun port TCP n'est publié sur l'hôte
+    environment:
+      - ALGORITHM=ML-KEM-1024
+      - ENVIRONMENT=production
+      # Configuration Unix Domain Socket
+      - SOCKET_PATH=/tmp/pq-crypto/pq.sock
+      - DISABLE_TCP=true # Désactive le listener TCP pour une isolation réseau totale
+      - MAX_PAYLOAD_BYTES=10485760
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    volumes:
+      # Volume mémoire partagé pour le socket IPC (RAM pure)
+      - pq-ipc-socket:/tmp/pq-crypto
+    healthcheck:
+      # La sonde autonome de pq-server teste automatiquement le socket Unix
+      test: ["CMD", "/usr/local/bin/pq-server", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+
+  # Exemple de service client applicatif (PHP, Node, Python, Go...)
+  # Décommentez pour tester l'interconnexion :
+  # my-app:
+  #   image: php:8.2-fpm-alpine
+  #   volumes:
+  #     - pq-ipc-socket:/tmp/pq-crypto:rw
+  #   depends_on:
+  #     pq-crypto-service:
+  #       condition: service_healthy
+
+volumes:
+  # Volume en mémoire vive (tmpfs) : rien n'est écrit sur le disque hôte
+  pq-ipc-socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m"

@@ -1,0 +1,78 @@
+services:
+  pq-crypto-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-pq-crypto-service}:${IMAGE_TAG:-0.0.1}
+    container_name: ${CONTAINER_NAME:-pq-crypto-microservice}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    ports:
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-8085}:${CONTAINER_PORT:-8080}"
+    environment:
+      # Configuration Générale Serveur
+      - LISTEN_ADDRESS=${LISTEN_ADDRESS:-0.0.0.0}
+      - PORT=${CONTAINER_PORT:-8080}
+      - ALGORITHM=${ALGORITHM:-ML-KEM-1024}
+      - MOCK_MODE=${MOCK_MODE:-false}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - ALLOW_LEGACY_ENVELOPES=${ALLOW_LEGACY_ENVELOPES:-false}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
+      - READ_TIMEOUT_SECONDS=${READ_TIMEOUT_SECONDS:-10}
+      - WRITE_TIMEOUT_SECONDS=${WRITE_TIMEOUT_SECONDS:-10}
+      - IDLE_TIMEOUT_SECONDS=${IDLE_TIMEOUT_SECONDS:-60}
+      - MAX_PAYLOAD_BYTES=${MAX_PAYLOAD_BYTES:-10485760}
+      - ACCESS_LOG=${ACCESS_LOG:-false}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-0}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-100}
+
+      # Transport IPC Unix Domain Socket (Optionnel : écoute simultanée ou exclusive par socket Unix)
+      - SOCKET_PATH=${SOCKET_PATH:-}
+      - SOCKET_MODE=${SOCKET_MODE:-0660}
+      - SOCKET_GID=${SOCKET_GID:--1}
+      - DISABLE_TCP=${DISABLE_TCP:-false}
+
+      # Intégration Infisical (Optionnelle - RAM Only, zéro persistance disque)
+      - INFISICAL_ENABLED=${INFISICAL_ENABLED:-false}
+      - INFISICAL_URL=${INFISICAL_URL:-http://infisical:8080}
+      - INFISICAL_CLIENT_ID=${INFISICAL_CLIENT_ID:-}
+      - INFISICAL_CLIENT_SECRET=${INFISICAL_CLIENT_SECRET:-}
+      - INFISICAL_PROJECT_ID=${INFISICAL_PROJECT_ID:-}
+      - INFISICAL_ENV=${INFISICAL_ENV:-prod}
+      - INFISICAL_SECRET_PUBKEY_NAME=${INFISICAL_SECRET_PUBKEY_NAME:-PQ_KEM_PUBLIC_KEY}
+      - INFISICAL_SECRET_PRIVKEY_NAME=${INFISICAL_SECRET_PRIVKEY_NAME:-PQ_KEM_PRIVATE_KEY}
+      - INFISICAL_SECRET_BUNDLE_NAME=${INFISICAL_SECRET_BUNDLE_NAME:-PQ_KEM_KEYPAIR}
+
+    # Durcissement de sécurité du conteneur (CIS Benchmark)
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:${NO_NEW_PRIVILEGES:-true}
+    read_only: ${READ_ONLY_ROOTFS:-true}
+    tmpfs:
+      - ${TMPFS_MOUNT:-/tmp:rw,noexec,nosuid,nodev,size=16m}
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/pq-server", "-healthcheck"]
+      interval: ${HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${HEALTHCHECK_TIMEOUT:-3s}
+      retries: ${HEALTHCHECK_RETRIES:-3}
+      start_period: ${HEALTHCHECK_START_PERIOD:-3s}
+    deploy:
+      resources:
+        limits:
+          cpus: '${CPU_LIMIT:-1.5}'
+          memory: ${MEM_LIMIT:-256M}
+          pids: ${PIDS_LIMIT:-100}
+        reservations:
+          cpus: '${CPU_RESERVATION:-0.2}'
+          memory: ${MEM_RESERVATION:-64M}
+    networks:
+      - pq-internal-net
+
+networks:
+  pq-internal-net:
+    name: ${NETWORK_NAME:-pq-internal-net}
+    driver: bridge

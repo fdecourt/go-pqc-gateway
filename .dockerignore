@@ -1,0 +1,35 @@
+# on ignor tout par defaut, comme ca rien rentre par erreur
+*
+
+# on remet que ce qu'il faut pour compilé et pour lancé les test go
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!tests/
+
+# les scenario de charge sont ecrit en javascript, le build les lit jamais
+tests/k6/
+
+# la doc sert a rien pour compilé
+**/*.md
+docs/
+
+# ceinture et bretelle, meme dans un dossier autorisé sa doit pas passé
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx
+**/*.cer
+**/id_rsa*
+**/id_ed25519*
+
+# artefact de compilation et de couverture, aucun interet ici
+**/bin/
+**/*.exe
+**/*.test
+**/*.out
+**/*.prof
