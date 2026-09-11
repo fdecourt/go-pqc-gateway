@@ -8,6 +8,11 @@
 !internal/
 !tests/
 
+# les licences partent dans l'image finale, donc elles ont le droit d'entrer
+# (celle du projet et celles des composants tiers compilés dans le binaire)
+!LICENSE
+!THIRD_PARTY_LICENSES
+
 # les scenario de charge sont ecrit en javascript, le build les lit jamais
 tests/k6/
 

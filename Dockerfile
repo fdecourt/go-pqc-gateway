@@ -35,10 +35,16 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
 # ==============================================================================
 FROM scratch
 
-# Métadonnées OCI
-LABEL maintainer="fdecourt"
-LABEL description="Micro-service de chiffrement post-quantique ML-KEM + AES-256-GCM"
-LABEL version="0.0.1"
+# Métadonnées OCI (org.opencontainers.image.*) : elles rattachent l'image publiée à son
+# dépôt source, sa licence et sa version sans dépendre d'un registre particulier. Les clés
+# standardisées sont préférées aux clés Docker historiques (maintainer, version) pour éviter
+# de déclarer deux fois la même information.
+LABEL org.opencontainers.image.title="pq-crypto-service" \
+      org.opencontainers.image.description="Micro-service de chiffrement post-quantique ML-KEM + AES-256-GCM" \
+      org.opencontainers.image.version="0.0.1" \
+      org.opencontainers.image.licenses="BUSL-1.1" \
+      org.opencontainers.image.source="https://github.com/fdecourt/go-pqc-gateway" \
+      org.opencontainers.image.authors="fdecourt"
 
 # Certificats SSL/TLS racine pour les appels HTTPS sortants sécurisés (Infisical, etc.)
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -49,6 +55,11 @@ COPY --from=builder /tmp/group /etc/group
 
 # Copie du binaire statique unique du service
 COPY --from=builder /bin/pq-server /usr/local/bin/pq-server
+
+# Textes de licence, embarqués avec le binaire qu'ils couvrent (lecture seule) : celle du
+# projet, et les mentions des composants tiers (Go, circl, CA Mozilla) que leurs licences
+# BSD-3-Clause et MPL-2.0 exigent de reproduire dans toute distribution binaire.
+COPY --chmod=0444 LICENSE THIRD_PARTY_LICENSES /
 
 # Basculement vers l'utilisateur non-privilégié
 USER 10001:10001

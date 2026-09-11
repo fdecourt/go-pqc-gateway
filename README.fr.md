@@ -341,8 +341,39 @@ PASS (Ensemble des suites unitaires, de régression, d'invariants et de KAT vali
 
 > [!CAUTION]
 > **Statut du Projet & Absence de Certification Formelle** :
-> - Ce projet est une implémentation logicielle ouverte destinée à explorer et intégrer la cryptographie post-quantique dans des architectures privées.
+> - Ce projet est une implémentation logicielle à code source public destinée à explorer et intégrer la cryptographie post-quantique dans des architectures privées.
 > - **Ce logiciel n'a pas fait l'objet d'un audit de sécurité indépendant par un laboratoire accrédité.**
 > - **Ce composant n'est pas certifié FIPS 140-3 et n'est pas validé par le programme CMVP (Cryptographic Module Validation Program).**
 > - L'emploi de termes comme "FIPS 203" ou "CNSA 2.0" fait référence aux **algorithmes mathématiques sous-jacents** et non à une labellisation officielle ou d'État.
 > - Pour tout usage en environnement critique, il appartient à l'intégrateur de réaliser une analyse de risques rigoureuse et de confiner ce service selon les règles de l'art.
+
+---
+
+## 11. Licence
+
+Distribué sous [Business Source License 1.1](LICENSE) (SPDX : `BUSL-1.1`) — Copyright (c) 2026 fdecourt.
+
+Le code source est public, mais il ne s'agit **pas** d'une licence open source. En résumé :
+
+| Usage | Autorisé |
+|-------|----------|
+| Lire, auditer, copier, modifier, redistribuer, usage hors production | Oui |
+| Usage en production pour les **besoins internes** de votre organisation | Oui (Additional Use Grant) |
+| Proposer la passerelle, ou un service qui l'expose, à des tiers (hébergé, managé, embarqué, marque blanche) | Non — licence commerciale requise |
+| Vendre, sous-licencier ou distribuer contre rémunération | Non — licence commerciale requise |
+
+À la **Change Date (2030-09-11)**, cette version passe automatiquement sous **licence Apache 2.0**. Seul le fichier [LICENSE](LICENSE) fait foi ; ce tableau n'en est qu'un résumé. Pour une licence commerciale, contactez le concédant via [github.com/fdecourt](https://github.com/fdecourt).
+
+La licence est indépendante de l'avertissement ci-dessus : l'absence de certification formelle reste valable quoi que la licence permette.
+
+### Third-Party Licenses
+
+Les composants livrés avec le service conservent leur propre licence. Leurs textes complets et mentions obligatoires figurent dans [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES), également embarqué dans l'image conteneur sous `/THIRD_PARTY_LICENSES`.
+
+| Composant | Licence | Livré sous forme |
+|-----------|---------|------------------|
+| Bibliothèque standard & runtime Go | BSD-3-Clause | compilé dans `pq-server` |
+| `golang.org/x/sys` | BSD-3-Clause | compilé dans `pq-server` |
+| `golang.org/x/time` | BSD-3-Clause | compilé dans `pq-server` |
+| `github.com/cloudflare/circl` (ML-KEM) | BSD-3-Clause | compilé dans `pq-server` |
+| Magasin de certificats CA Mozilla (paquet Alpine `ca-certificates-bundle`) | MPL-2.0 AND MIT | `/etc/ssl/certs/ca-certificates.crt` dans l'image |

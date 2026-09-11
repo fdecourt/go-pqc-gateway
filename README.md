@@ -341,8 +341,39 @@ PASS (All unit, regression, security invariant, and KAT suites passing)
 
 > [!CAUTION]
 > **Project Status & Absence of Formal Certification**:
-> - This software is an open-source project designed to explore and integrate post-quantum cryptography within private architectures.
+> - This software is a source-available project designed to explore and integrate post-quantum cryptography within private architectures.
 > - **This software has NOT undergone a formal, independent security audit by an accredited third-party testing laboratory.**
 > - **This component is NOT certified under NIST FIPS 140-3 and has NOT been validated by the Cryptographic Module Validation Program (CMVP).**
 > - References to "FIPS 203" or "CNSA 2.0" denote the **underlying mathematical algorithms** and specifications implemented, not an official government or regulatory certification.
 > - For critical production environments, integrators must perform their own threat modeling and risk assessment, and enforce defense-in-depth isolation measures.
+
+---
+
+## 11. License
+
+Released under the [Business Source License 1.1](LICENSE) (SPDX: `BUSL-1.1`) — Copyright (c) 2026 fdecourt.
+
+The source code is public, but this is **not** an open-source license. In short:
+
+| Use | Allowed |
+|-----|---------|
+| Read, audit, copy, modify, redistribute, non-production use | Yes |
+| Production use for the **internal operations** of your organization | Yes (Additional Use Grant) |
+| Offering the gateway, or a service exposing it, to third parties (hosted, managed, embedded, white-label) | No — requires a commercial license |
+| Selling, sublicensing or distributing it for a fee | No — requires a commercial license |
+
+On the **Change Date (2030-09-11)**, this version automatically becomes available under the **Apache License 2.0**. The [LICENSE](LICENSE) file is authoritative; this table is only a summary. For a commercial license, contact the Licensor through [github.com/fdecourt](https://github.com/fdecourt).
+
+The license is independent of the disclaimer above: the absence of formal certification remains in force whatever the license permits.
+
+### Third-Party Licenses
+
+The components shipped with the service keep their own licenses. Their full texts and notices are in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES), which is also embedded in the container image at `/THIRD_PARTY_LICENSES`.
+
+| Component | License | Shipped as |
+|-----------|---------|------------|
+| Go standard library & runtime | BSD-3-Clause | compiled into `pq-server` |
+| `golang.org/x/sys` | BSD-3-Clause | compiled into `pq-server` |
+| `golang.org/x/time` | BSD-3-Clause | compiled into `pq-server` |
+| `github.com/cloudflare/circl` (ML-KEM) | BSD-3-Clause | compiled into `pq-server` |
+| Mozilla CA certificate bundle (Alpine `ca-certificates-bundle`) | MPL-2.0 AND MIT | `/etc/ssl/certs/ca-certificates.crt` in the image |
