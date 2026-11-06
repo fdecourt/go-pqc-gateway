@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pq-crypto-service:0.3.0
+    image: pq-crypto-service:0.4.0
     container_name: pq-crypto-microservice
     restart: unless-stopped
     # Note : Aucun port TCP n'est publié sur l'hôte

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${IMAGE_NAME:-pq-crypto-service}:${IMAGE_TAG:-0.3.0}
+    image: ${IMAGE_NAME:-pq-crypto-service}:${IMAGE_TAG:-0.4.0}
     container_name: ${CONTAINER_NAME:-pq-crypto-microservice}
     restart: ${RESTART_POLICY:-unless-stopped}
     ports:
@@ -55,6 +55,12 @@ services:
       - DISABLE_TCP=${DISABLE_TCP:-false}
 
       # Intégration Infisical (Optionnelle - RAM Only, zéro persistance disque)
+      # Coffre de clés qui conserve la paire : none (éphémère), infisical, openbao.
+      # Sans coffre, toute donnée chiffrée devient illisible au redémarrage.
+      - KEYSTORE=${KEYSTORE:-none}
+      # Commande « pq-server -migrate-keys » : coffre source (la cible est KEYSTORE)
+      - KEYSTORE_MIGRATE_FROM=${KEYSTORE_MIGRATE_FROM:-}
+      # Ancien sélecteur, équivalent à KEYSTORE=infisical
       - INFISICAL_ENABLED=${INFISICAL_ENABLED:-false}
       - INFISICAL_URL=${INFISICAL_URL:-https://infisical:8443}
       - INFISICAL_CLIENT_ID=${INFISICAL_CLIENT_ID:-}
@@ -65,6 +71,18 @@ services:
       - INFISICAL_ENV=${INFISICAL_ENV:-prod}
       - INFISICAL_SECRET_PUBKEY_NAME=${INFISICAL_SECRET_PUBKEY_NAME:-PQ_KEM_PUBLIC_KEY}
       - INFISICAL_SECRET_PRIVKEY_NAME=${INFISICAL_SECRET_PRIVKEY_NAME:-PQ_KEM_PRIVATE_KEY}
+      # OpenBao (KV v2) : authentification par AppRole (OPENBAO_ROLE_ID + OPENBAO_SECRET_ID)
+      # ou par jeton (OPENBAO_TOKEN). Préférer les variantes *_FILE pour les secrets.
+      - OPENBAO_ADDR=${OPENBAO_ADDR:-https://openbao:8200}
+      - OPENBAO_CA_FILE=${OPENBAO_CA_FILE:-}
+      - OPENBAO_NAMESPACE=${OPENBAO_NAMESPACE:-}
+      - OPENBAO_AUTH=${OPENBAO_AUTH:-}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - OPENBAO_ROLE_ID=${OPENBAO_ROLE_ID:-}
+      - OPENBAO_SECRET_ID=${OPENBAO_SECRET_ID:-}
+      - OPENBAO_APPROLE_MOUNT=${OPENBAO_APPROLE_MOUNT:-approle}
+      - OPENBAO_KV_MOUNT=${OPENBAO_KV_MOUNT:-secret}
+      - OPENBAO_SECRET_PATH=${OPENBAO_SECRET_PATH:-pq-crypto-service/keypair}
       - INFISICAL_SECRET_BUNDLE_NAME=${INFISICAL_SECRET_BUNDLE_NAME:-PQ_KEM_KEYPAIR}
 
     # Durcissement de sécurité du conteneur (CIS Benchmark)

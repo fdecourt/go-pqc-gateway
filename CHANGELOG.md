@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0 — 2026-11-06
+
+### Coffres de clés : indépendance vis-à-vis du KMS
+
+- **Sélecteur `KEYSTORE`** (`none`, `infisical`, `openbao`) et registre de coffres : chaque
+  coffre est un paquet autonome qui s'enregistre et lit sa propre configuration. Ajouter un
+  coffre (KMS de cloud…) ne touche ni la configuration générale, ni le moteur, ni l'API.
+  `INFISICAL_ENABLED=true` reste accepté (équivaut à `KEYSTORE=infisical`).
+- **OpenBao** (KV v2, compatible HashiCorp Vault) : authentification AppRole ou jeton, espace
+  de noms, TLS 1.3 sans proxy ni redirection. Écriture en check-and-set 0 (jamais
+  d'écrasement), puis `cas_required=true` et `delete_version_after=0s`. Une paire supprimée
+  bloque le démarrage (restauration par `bao kv undelete`) au lieu d'en générer une nouvelle.
+  La politique minimale du service (`create`, `read`) ne lui permet ni de remplacer ni de
+  supprimer la paire. Le jeton AppRole est révoqué dès la paire chargée : sa valeur,
+  passée par des chaînes Go non effaçables, ne vaut plus rien si elle fuit.
+- **Effacement des secrets d'accès aux coffres** : chaque échange avec un coffre s'exécute sous
+  `runtime/secret` (jeton dans l'en-tête HTTP, tampons `net/http` et `crypto/tls` effacés à leur
+  libération, ramasse-miettes forcé après le démarrage), et les secrets lus dans l'environnement
+  sont effacés dans la copie du runtime. Mesuré : plus aucune copie du jeton ni du `secret_id`
+  dans la mémoire du processus (2 et 1 à 3 auparavant).
+- **Correction** : `scrubEnviron`, qui efface les secrets du bloc d'environnement initial, en
+  gardait une copie complète (tous les secrets passés par variable : `AUTH_TOKENS`, secrets
+  des coffres) dans un tampon jamais effacé. Le tampon est maintenant effacé.
+- **Format de bundle commun** à tous les coffres (`internal/keystore`), et commande
+  **`pq-server -migrate-keys`** (`KEYSTORE_MIGRATE_FROM` vers `KEYSTORE`) : copie,
+  relecture, comparaison ; rejouable, refuse d'écraser une autre paire, ne supprime jamais
+  la source.
+- **Avertissement `keystore_disabled`** en production sans coffre : la paire éphémère rend
+  toute donnée chiffrée illisible au redémarrage.
+- Le client HTTP durci (TLS 1.3, CA épinglée, réponses bornées, sans redirection) est
+  partagé par les coffres ; la configuration Infisical quitte `internal/config` pour son paquet.
+
 ## 0.3.0 — 2026-11-05
 
 Le chiffrement ne change pas : sans liaison d'identité, les enveloppes des versions

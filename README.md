@@ -103,9 +103,9 @@ sequenceDiagram
 - **FIPS 203 Implementation**: The gateway implements ML-KEM as standardized in NIST FIPS 203 using Cloudflare's CIRCL library. *It does not claim an official NIST FIPS 140-3 or CMVP cryptographic module validation.*
 - **DUAL Hybrid Constructions**: The DUAL modes (`DUAL-X25519+ML-KEM-768` and `DUAL-X25519+ML-KEM-1024`) are project-defined hybrid constructions combining X25519 and ML-KEM through HKDF-SHA256 with transcript binding. The ML-KEM component conforms to FIPS 203; the complete hybrid construction is not itself a NIST-standardized KEM.
 - **Key Management & Ephemeral vs Vault Mode**:
-  - When Infisical is enabled, the active keypair is loaded from or stored as a single keypair bundle in the vault (`PQ_KEM_KEYPAIR`).
+  - When a vault is configured (`KEYSTORE=infisical` or `openbao`, see §6c), the active keypair is loaded from or stored as a single verified keypair bundle in the vault.
   - When disabled, the gateway operates with an ephemeral in-memory keypair.
-  - **Ephemeral Mode Note**: When Infisical is disabled, a new KEM keypair is generated at each process start. Ciphertexts or wrapped keys produced with a previous process instance cannot be recovered after restart unless the corresponding keypair has been externally preserved.
+  - **Ephemeral Mode Note**: Without a vault (`KEYSTORE=none`), a new KEM keypair is generated at each process start. Ciphertexts or wrapped keys produced with a previous process instance cannot be recovered after restart unless the corresponding keypair has been externally preserved.
 - **Key Identifier & Rotation**:
   - Every envelope carries a `kid`: `hex(SHA-256("pqc-kid:" ‖ public key))[:16]`, identifying the recipient key. An envelope whose `kid` designates another key is rejected (`422`). `/public-key` returns the active `kid`.
   - Selecting among several retained private keys by `kid` (keyring) is the next roadmap step; today the gateway serves the single active keypair.
@@ -177,6 +177,7 @@ A plaintext, a data key or a private key only lives in `[]byte` buffers owned by
 - **Responses**: small responses are built in a wipeable buffer; above 16 KiB, the ciphertext or plaintext is encoded (Base64 or JSON string) in 48 KiB blocks straight to the connection, with a precomputed `Content-Length` and no response buffer.
 - **Cryptographic computation**: the transcript is assembled and hashed on the stack, HKDF-SHA256 runs on the stack (verified against `crypto/hkdf`), the AES key lives in a stack array: 9 allocations per encryption instead of 51. The image is built with `GOEXPERIMENT=runtimesecret`. Every operation (KEM, HKDF, AES-GCM, X25519) runs under `runtime/secret`: registers and stack are erased on return, and the libraries' internal allocations (expanded AES keys, Keccak states, intermediate secrets) are erased as soon as they are freed. Measured cost: negligible now that the `secret.Do` scope barely allocates (31 µs instead of 30 µs for an ML-KEM-768 encryption). A binary built without the experiment logs `secret_erasure_disabled` in production.
 - **Infisical**: the private key is only decoded and encoded in wipeable buffers; HTTP redirects are refused (a `307` would resend the body, hence the key, to the designated host). The `client_secret` is read as bytes, removed from the process environment as soon as it is read, and wiped once the engine is built: it is only needed at startup.
+- **Key vaults**: every exchange with the vault (Infisical, OpenBao, any vault added later) runs under `runtime/secret`, HTTP transport goroutines included: copies the service cannot wipe itself (token in the HTTP header, `net/http` and `crypto/tls` buffers, the response carrying the private key) are erased when freed, and a garbage collection is forced right after startup. Secrets read from the environment (`AUTH_TOKENS`, `*_SECRET`, `OPENBAO_TOKEN`…) are wiped in the copy of the environment the Go runtime makes at launch. Measured in `/proc/<pid>/mem` after starting on OpenBao: without these protections the service kept 2 copies of the token and 1 to 3 of the `secret_id`; none remain, whether the secret is passed as a variable or as a file.
 - **Measurement** (searching markers in `/proc/<pid>/mem`): after one encryption, decryption, key wrap and key unwrap, 0.1.2 left 5–6 copies of the text and 7–8 of the key; this version leaves at most 1 of the text and 2 of the (Base64) key, and none after a few more requests (0.1.2 still kept 1–2 copies of the key).
 - **Swap**: the compose file sets `memswap_limit` to the memory limit, which forbids writing any of the process memory to disk.
 - **Hardware AES**: without AES-NI (or ARMv8 extensions), Go's software AES is not constant-time; the service says so at startup (`software_aes`).
@@ -184,6 +185,45 @@ A plaintext, a data key or a private key only lives in `[]byte` buffers owned by
 - **Docker Daemon Isolation (`/var/run/docker.sock`)**: The container does not mount the host Docker socket, possesses no permissions to access it, and operates in an isolated mount namespace.
 
 ---
+
+## 6c. Key Vaults: KMS Independence
+
+The master KEM keypair is the only piece of data whose loss makes **every** ciphertext unreadable. The service hands it to a vault selected by `KEYSTORE`, without depending on any provider:
+
+| `KEYSTORE` | Vault | Notes |
+| :--- | :--- | :--- |
+| `none` (default) | None: ephemeral in-memory keypair | Data unreadable after restart. `keystore_disabled` warning in production. |
+| `infisical` | Infisical (Universal Auth) | `INFISICAL_ENABLED=true` is still accepted. |
+| `openbao` | OpenBao, KV v2 engine (HashiCorp Vault compatible) | Open source (MPL-2.0), self-hostable. Recommended for long-term retention. |
+
+**Guarantees shared by every vault** (`keystore.Backend` contract):
+- **Single format**: the keypair is stored as the same versioned JSON bundle (`format_version`, `algorithm`, `public_key`, `private_key`, `created_at`, `checksum`) whatever the vault. Nothing is provider-specific.
+- **Never overwritten**: an existing keypair is never replaced by a new one.
+- **Never silently regenerated**: a deleted, corrupted or unreachable keypair blocks startup. Only a vault that has *never* held a keypair triggers generation.
+- **Lossless migration**: `pq-server -migrate-keys` copies the keypair from one vault to another, reads it back and compares. It can be replayed, refuses to overwrite a different keypair and **never deletes the source**.
+
+```bash
+# Move from Infisical to OpenBao (both configured in the environment)
+docker compose run --rm -e KEYSTORE_MIGRATE_FROM=infisical -e KEYSTORE=openbao \
+  pq-crypto-service -migrate-keys
+# Then start with KEYSTORE=openbao, check the kid (unchanged) and the decryption of
+# existing data, and only then retire the old vault.
+```
+
+**OpenBao, long-term retention**:
+- The keypair is written with check-and-set 0 (create only). The service then sets `cas_required=true` (a `bao kv put` without `-cas` is refused, administrators included) and `delete_version_after=0s` (no expiry).
+- A deletion (`bao kv delete`) blocks startup instead of generating a new keypair; `bao kv undelete -versions=N` restores it unchanged.
+- Minimal service policy, which allows it neither to replace nor to delete the keypair:
+
+```hcl
+path "secret/data/pq-crypto-service/keypair"     { capabilities = ["create", "read"] }
+path "secret/metadata/pq-crypto-service/keypair" { capabilities = ["create", "read", "update"] }
+```
+
+- **Token**: prefer AppRole, with a short `token_ttl` (minutes). The token obtained at startup is **revoked** as soon as the keypair is loaded (`openbao_token_revoked`). A static token (`OPENBAO_TOKEN`) is not revoked, since it is reused: limit it to this policy and rotate it. Either way, its value does not stay in memory (see §6b).
+- Back up OpenBao storage (`bao operator raft snapshot save`) and keep the unseal keys offline: a sealed vault whose keys are lost is data loss.
+
+**Adding a vault** (cloud KMS, another secrets manager): write a package that calls `keystore.Register` in its `init()`, reads its configuration through `keystore.Settings` and honours the contract above, then import it in `cmd/server/keystores.go`. Neither the general configuration, the engine nor the API change. A KMS that does not store secrets (Google Cloud KMS, AWS KMS) fits by encrypting the bundle under its key and storing the result in a secrets store (Secret Manager…). The keypair then stays recoverable as long as the KMS key exists: protect it against destruction.
 
 ## 7. Client Integration Examples (Envelope KMS Pattern)
 
@@ -297,6 +337,15 @@ The `.env` file provides configuration tuning for the gateway:
 | `AUDIT_LOG` | `true` | One `audit` line per cryptographic operation: operation, client, `kid`, outcome, correlation id. Never any data. |
 | `MAX_CONNECTIONS` | `1024` | Concurrent connections accepted per listener; beyond it, accept waits (0 = unlimited). |
 | `SOCKET_ALLOWED_UIDS` | *(empty)* | UIDs of processes allowed on the Unix socket, attested by the kernel (`SO_PEERCRED`, Linux); other connections are closed before any read. The UID becomes the identity. |
+| `KEYSTORE` | `none` | Keypair vault: `none` (ephemeral), `infisical`, `openbao` (see §6c). |
+| `KEYSTORE_MIGRATE_FROM` | *(empty)* | Source vault of `pq-server -migrate-keys` (the target is `KEYSTORE`). |
+| `OPENBAO_ADDR` | `https://openbao:8200` | OpenBao URL; **`https://` required in production**. TLS 1.3, no proxy, no redirects. |
+| `OPENBAO_AUTH` | *(inferred)* | `approle` (when `OPENBAO_ROLE_ID` is set) or `token`. |
+| `OPENBAO_ROLE_ID` / `OPENBAO_SECRET_ID` | *(empty)* | AppRole credentials (`OPENBAO_SECRET_ID_FILE` accepted). |
+| `OPENBAO_TOKEN` | *(empty)* | Token (`OPENBAO_TOKEN_FILE` accepted). |
+| `OPENBAO_CA_FILE` / `OPENBAO_NAMESPACE` | *(empty)* | Instance authority (PEM); namespace. |
+| `OPENBAO_KV_MOUNT` / `OPENBAO_SECRET_PATH` | `secret` / `pq-crypto-service/keypair` | KV v2 mount and keypair path. |
+| `OPENBAO_APPROLE_MOUNT` | `approle` | AppRole auth method mount. |
 | `INFISICAL_CA_FILE` | *(empty)* | Authority (PEM) of the Infisical instance; empty: system CAs. The transport requires TLS 1.3. |
 | `MAX_PAYLOAD_BYTES` | `10485760` (10 MiB) | Request body ceiling (raise it for larger payloads, together with `MEM_LIMIT`). `/decrypt` accepts 1.5 × this value + 64 KiB (see §4b). Keep `MAX_CONCURRENT_REQUESTS × 4 × MAX_PAYLOAD_BYTES` below `MEM_LIMIT`. |
 | `GOMEMLIMIT` | *(85% of the container limit)* | Go garbage-collector target; computed automatically when unset. |

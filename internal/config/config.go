@@ -5,19 +5,20 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"pq-crypto-service/internal/credential"
+	"pq-crypto-service/internal/keystore"
 	"pq-crypto-service/internal/secmem"
 )
 
 // ServiceVersion identifie la version applicative publiée du micro-service.
-const ServiceVersion = "0.3.0"
+const ServiceVersion = "0.4.0"
 
 // Config regroupe tous les paramètres de configuration du micro-service.
 type Config struct {
@@ -62,17 +63,13 @@ type Config struct {
 	MaxConnections     int                // Connexions simultanées admises par écouteur (défaut: 1024 ; 0 = illimité)
 	SocketAllowedUIDs  []uint32           // UID des pairs admis sur le socket Unix (SO_PEERCRED) ; vide : permissions du fichier seules
 
-	// Intégration Infisical (gestionnaire de secrets sans persistance disque)
-	InfisicalEnabled           bool   // Activer la synchronisation avec Infisical
-	InfisicalURL               string // URL de l'instance Infisical
-	InfisicalClientID          string // Client ID pour Universal Auth
-	InfisicalClientSecret      []byte // Client Secret pour Universal Auth ; effacé (WipeSecrets) une fois le moteur construit
-	InfisicalCAFile            string // Autorité de certification de l'instance Infisical (PEM) ; vide : CA du système
-	InfisicalProjectID         string // ID du projet (Workspace) dans Infisical
-	InfisicalEnv               string // Environnement cible dans Infisical (ex: prod, staging, dev)
-	InfisicalSecretBundleName  string // Nom du secret unique atomique contenant la paire de clés (défaut: PQ_KEM_KEYPAIR)
-	InfisicalSecretPubKeyName  string // Ancien format scindé (non lu) : sa présence bloque la génération d'une paire
-	InfisicalSecretPrivKeyName string // Ancien format scindé (non lu) : sa présence bloque la génération d'une paire
+	// Coffre de clés (Infisical, OpenBao…) : sa configuration propre est lue par son paquet
+	// (voir keystore.Backend), le service n'en connaît que le nom.
+	Keystore            string // Coffre qui conserve la paire (KEYSTORE) ; vide : paire éphémère en RAM
+	KeystoreMigrateFrom string // Coffre source de la commande -migrate-keys (KEYSTORE_MIGRATE_FROM)
+	// keystoreSecrets contient les secrets des coffres sélectionnés, lus au démarrage ;
+	// effacés par WipeSecrets.
+	keystoreSecrets map[string][]byte
 }
 
 // envValue extrait et valide une variable d'environnement avec une valeur par défaut.
@@ -181,18 +178,10 @@ func LoadConfig() (*Config, error) {
 	cfg.SocketAllowedUIDs, err = envValue("SOCKET_ALLOWED_UIDS", nil, parseUIDs)
 	record(err)
 
-	cfg.InfisicalEnabled, err = envValue("INFISICAL_ENABLED", false, strconv.ParseBool)
+	cfg.Keystore, err = resolveKeystore()
 	record(err)
-	cfg.InfisicalURL = getEnv("INFISICAL_URL", "https://infisical:8443")
-	cfg.InfisicalClientID = getEnv("INFISICAL_CLIENT_ID", "")
-	cfg.InfisicalClientSecret, err = takeEnvSecret("INFISICAL_CLIENT_SECRET")
-	record(err)
-	cfg.InfisicalCAFile = getEnv("INFISICAL_CA_FILE", "")
-	cfg.InfisicalProjectID = getEnv("INFISICAL_PROJECT_ID", "")
-	cfg.InfisicalEnv = getEnv("INFISICAL_ENV", "prod")
-	cfg.InfisicalSecretBundleName = getEnv("INFISICAL_SECRET_BUNDLE_NAME", "PQ_KEM_KEYPAIR")
-	cfg.InfisicalSecretPubKeyName = getEnv("INFISICAL_SECRET_PUBKEY_NAME", "PQ_KEM_PUBLIC_KEY")
-	cfg.InfisicalSecretPrivKeyName = getEnv("INFISICAL_SECRET_PRIVKEY_NAME", "PQ_KEM_PRIVATE_KEY")
+	cfg.KeystoreMigrateFrom = strings.ToLower(strings.TrimSpace(getEnv("KEYSTORE_MIGRATE_FROM", "")))
+	record(cfg.takeKeystoreSecrets())
 
 	if firstErr != nil {
 		return nil, firstErr
@@ -243,7 +232,9 @@ func (c *Config) Validate() error {
 	if c.RateLimitRPS > 0 && c.RateLimitBurst <= 0 {
 		return fmt.Errorf("RATE_LIMIT_BURST invalide (%d): au moins 1 quand RATE_LIMIT_RPS est actif", c.RateLimitBurst)
 	}
-	if c.SocketPath != "" && !filepath.IsAbs(c.SocketPath) {
+	// path.IsAbs accepte aussi un chemin POSIX (/tmp/pq.sock) sous Windows, où filepath.IsAbs
+	// exige une lettre de lecteur : la configuration d'un conteneur Linux se teste partout.
+	if c.SocketPath != "" && !filepath.IsAbs(c.SocketPath) && !path.IsAbs(filepath.ToSlash(c.SocketPath)) {
 		return fmt.Errorf("SOCKET_PATH doit être un chemin absolu (reçu %q)", c.SocketPath)
 	}
 	if c.MaxConnections < 0 {
@@ -273,11 +264,16 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("LOG_LEVEL invalide (%s): valeurs acceptées debug, info, warn ou error", c.LogLevel)
 	}
-	if c.InfisicalEnabled && c.IsProduction() {
-		u, err := url.Parse(c.InfisicalURL)
-		if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
-			return fmt.Errorf("INFISICAL_URL doit être en https:// en production (reçu %q) : la clé privée et le client_secret y transitent", c.InfisicalURL)
+	for _, name := range []string{c.Keystore, c.KeystoreMigrateFrom} {
+		if name == "" {
+			continue
 		}
+		if _, err := keystore.Lookup(name); err != nil {
+			return err
+		}
+	}
+	if c.KeystoreMigrateFrom != "" && c.KeystoreMigrateFrom == c.Keystore {
+		return fmt.Errorf("KEYSTORE_MIGRATE_FROM doit désigner un autre coffre que KEYSTORE (%q)", c.Keystore)
 	}
 	if c.MockMode && c.IsProduction() {
 		return fmt.Errorf("FATAL: MOCK_MODE n'est autorisé qu'avec ENVIRONMENT parmi %s (reçu %q)",
@@ -304,8 +300,80 @@ const MaxPayloadCeiling = 1 << 30
 
 // WipeSecrets efface les secrets de démarrage qui ne servent plus une fois le moteur construit.
 func (c *Config) WipeSecrets() {
-	secmem.Wipe(c.InfisicalClientSecret)
-	c.InfisicalClientSecret = nil
+	for name, v := range c.keystoreSecrets {
+		secmem.Wipe(v)
+		delete(c.keystoreSecrets, name)
+	}
+}
+
+// resolveKeystore lit KEYSTORE. INFISICAL_ENABLED=true reste accepté et vaut
+// KEYSTORE=infisical ; « none » (ou vide) désigne une paire éphémère, sans coffre.
+func resolveKeystore() (string, error) {
+	name := strings.ToLower(strings.TrimSpace(getEnv("KEYSTORE", "")))
+	if name == "none" {
+		name = ""
+	}
+	infisical, err := envValue("INFISICAL_ENABLED", false, strconv.ParseBool)
+	if err != nil {
+		return "", err
+	}
+	if infisical {
+		switch name {
+		case "":
+			name = "infisical"
+		case "infisical":
+		default:
+			return "", fmt.Errorf("INFISICAL_ENABLED=true contredit KEYSTORE=%s : ne garder que KEYSTORE", name)
+		}
+	}
+	return name, nil
+}
+
+// takeKeystoreSecrets lit les secrets des coffres sélectionnés (KEYSTORE et
+// KEYSTORE_MIGRATE_FROM), puis retire de l'environnement ceux de tous les coffres connus.
+func (c *Config) takeKeystoreSecrets() error {
+	c.keystoreSecrets = map[string][]byte{}
+	var firstErr error
+	for _, name := range []string{c.Keystore, c.KeystoreMigrateFrom} {
+		if name == "" {
+			continue
+		}
+		b, err := keystore.Lookup(name)
+		if err != nil {
+			return err
+		}
+		for _, v := range b.SecretVars {
+			val, err := takeEnvSecret(v)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			if val != nil {
+				c.keystoreSecrets[v] = val
+			}
+		}
+	}
+	for _, v := range keystore.AllSecretVars() {
+		if _, taken := c.keystoreSecrets[v]; !taken {
+			_ = os.Unsetenv(v)
+		}
+	}
+	return firstErr
+}
+
+// KeystoreSettings renvoie la configuration vue par un coffre (voir keystore.Settings).
+func (c *Config) KeystoreSettings() keystore.Settings { return keystoreSettings{c} }
+
+type keystoreSettings struct{ c *Config }
+
+func (s keystoreSettings) Get(name, fallback string) string { return getEnv(name, fallback) }
+func (s keystoreSettings) Production() bool                 { return s.c.IsProduction() }
+func (s keystoreSettings) Algorithm() string                { return s.c.Algorithm }
+
+// Secret transfère la propriété du secret à l'appelant (une seule lecture possible).
+func (s keystoreSettings) Secret(name string) []byte {
+	v := s.c.keystoreSecrets[name]
+	delete(s.c.keystoreSecrets, name)
+	return v
 }
 
 // Versions TLS acceptées par TLS_MIN_VERSION (valeurs de crypto/tls, sans importer le paquet ici).
@@ -477,7 +545,9 @@ func getEnv(key, fallback string) string {
 
 // EnvironmentSecrets énumère les variables d'environnement secrètes, retirées de
 // l'environnement du processus dès leur lecture.
-var EnvironmentSecrets = []string{"INFISICAL_CLIENT_SECRET", "AUTH_TOKENS"}
+func EnvironmentSecrets() []string {
+	return append([]string{"AUTH_TOKENS"}, keystore.AllSecretVars()...)
+}
 
 // takeEnvSecret lit un secret depuis KEY_FILE (fichier) ou KEY (variable), puis retire la
 // variable de l'environnement du processus : elle n'a pas à rester lisible après le démarrage.
@@ -500,8 +570,15 @@ func takeEnvSecret(key string) ([]byte, error) {
 		return out, nil
 	}
 	val, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(val) == "" {
+	if !ok {
 		return nil, nil
 	}
-	return []byte(strings.TrimSpace(val)), nil
+	// val pointe sur la copie de l'environnement que le runtime a faite au lancement : elle
+	// est effacée une fois recopiée, puis la variable est retirée (defer).
+	defer secmem.WipeString(val)
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return nil, nil
+	}
+	return []byte(trimmed), nil
 }

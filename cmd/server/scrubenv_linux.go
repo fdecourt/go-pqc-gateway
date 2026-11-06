@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"pq-crypto-service/internal/secmem"
 )
 
 // scrubEnviron écrase, dans le bloc d'environnement initial du processus (celui que le
@@ -27,6 +29,9 @@ func scrubEnviron(names ...string) error {
 	defer mem.Close()
 
 	block := make([]byte, end-start)
+	// La copie de travail contient l'environnement entier, secrets compris : elle est effacée
+	// au retour, sinon elle survivrait dans le tas à l'effacement qu'elle sert à réaliser.
+	defer secmem.Wipe(block)
 	if _, err := mem.ReadAt(block, int64(start)); err != nil { // #nosec G115 -- adresse du noyau
 		return fmt.Errorf("lecture du bloc d'environnement: %w", err)
 	}

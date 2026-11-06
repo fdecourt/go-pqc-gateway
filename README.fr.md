@@ -102,10 +102,10 @@ sequenceDiagram
 - **Alignement CNSA 2.0** : Le service utilise des algorithmes sélectionnés et alignés avec les recommandations CNSA 2.0 pour l'établissement de clés (ML-KEM-1024) et le chiffrement symétrique (AES-256-GCM). *Note : une conformité CNSA 2.0 globale englobe d'autres protocoles et algorithmes (signature ML-DSA) non couverts par cette brique.*
 - **Implémentation FIPS 203** : Le gateway implémente ML-KEM conformément aux spécifications du standard NIST FIPS 203 via la bibliothèque CIRCL (Cloudflare). *Il ne prétend pas faire l'objet d'une validation de module FIPS 140-3 / CMVP.*
 - **Constructions Hybrides DUAL** : Les modes DUAL (`DUAL-X25519+ML-KEM-768` et `DUAL-X25519+ML-KEM-1024`) sont des constructions hybrides définies par le projet combinant X25519 et ML-KEM via HKDF-SHA256 avec liaison au transcript. Le composant ML-KEM est conforme au standard FIPS 203 ; la construction hybride globale n'est pas en elle-même un standard de KEM du NIST.
-- **Gestion des Clés & Mode Éphémère vs Infisical** :
-  - Lorsque Infisical est activé, la paire de clés active est chargée depuis le coffre ou stockée sous forme d'un bundle unique vérifié (`PQ_KEM_KEYPAIR`).
+- **Gestion des Clés & Mode Éphémère vs Coffre** :
+  - Lorsqu'un coffre est configuré (`KEYSTORE=infisical` ou `openbao`, voir §6c), la paire de clés active est chargée depuis le coffre ou stockée sous forme d'un bundle unique vérifié.
   - Lorsqu'il est désactivé, la passerelle fonctionne avec une paire éphémère en mémoire vive.
-  - **Avertissement mode éphémère** : lorsque Infisical est désactivé, une nouvelle paire de clés KEM est générée à chaque démarrage du processus. Les ciphertexts et clés enveloppées générés avec une instance précédente ne peuvent être récupérés après un redémarrage, à moins que la paire de clés correspondante n'ait été conservée de manière externe.
+  - **Avertissement mode éphémère** : sans coffre (`KEYSTORE=none`), une nouvelle paire de clés KEM est générée à chaque démarrage du processus. Les ciphertexts et clés enveloppées générés avec une instance précédente ne peuvent être récupérés après un redémarrage, à moins que la paire de clés correspondante n'ait été conservée de manière externe.
 - **Identifiant de clé et rotation** :
   - Chaque enveloppe porte un `kid` : `hex(SHA-256("pqc-kid:" ‖ clé publique))[:16]`, qui désigne la clé destinataire. Une enveloppe dont le `kid` désigne une autre clé est refusée (`422`). `/public-key` renvoie le `kid` actif.
   - Choisir parmi plusieurs clés privées conservées selon le `kid` (trousseau) est la prochaine étape de la feuille de route ; aujourd'hui le gateway sert la seule paire active.
@@ -177,6 +177,7 @@ Un clair, une clé de données ou une clé privée ne vit que dans des tampons `
 - **Réponses** : les petites réponses sont construites dans un tampon effaçable ; au-delà de 16 Kio, le chiffré ou le clair est encodé (Base64 ou chaîne JSON) par blocs de 48 Kio directement vers la connexion, avec `Content-Length` calculé d'avance, sans tampon de réponse.
 - **Calcul cryptographique** : transcript assemblé et haché sur la pile, HKDF-SHA256 sur la pile (vérifié contre `crypto/hkdf`), clé AES dans un tableau de pile : 9 allocations par chiffrement au lieu de 51. L'image est compilée avec `GOEXPERIMENT=runtimesecret`. Chaque opération (KEM, HKDF, AES-GCM, X25519) s'exécute sous `runtime/secret` : registres et pile effacés au retour, allocations internes des bibliothèques (clés AES étendues, états Keccak, secrets intermédiaires) effacées dès leur libération. Coût mesuré : négligeable depuis que le périmètre `secret.Do` n'alloue presque plus (31 µs au lieu de 30 µs pour un chiffrement ML-KEM-768). Un binaire compilé sans l'expérience journalise `secret_erasure_disabled` en production.
 - **Infisical** : la clé privée est décodée et encodée uniquement dans des tampons effaçables ; les redirections HTTP sont refusées (une `307` renverrait le corps, donc la clé, vers l'hôte désigné). Le `client_secret` est lu en octets, retiré de l'environnement du processus dès sa lecture et effacé une fois le moteur construit : il ne sert qu'au démarrage.
+- **Coffres de clés** : chaque échange avec le coffre (Infisical, OpenBao, tout coffre ajouté) s'exécute sous `runtime/secret`, goroutines du transport HTTP comprises : les copies que le service ne peut pas effacer lui-même (jeton dans l'en-tête HTTP, tampons `net/http` et `crypto/tls`, réponse portant la clé privée) sont effacées à leur libération, et un passage du ramasse-miettes est forcé juste après le démarrage. Les secrets lus dans l'environnement (`AUTH_TOKENS`, `*_SECRET`, `OPENBAO_TOKEN`…) sont effacés dans la copie que le runtime Go fait de l'environnement au lancement. Mesure dans `/proc/<pid>/mem` après démarrage sur OpenBao : 0.4.0 sans ces protections gardait 2 copies du jeton et 1 à 3 du `secret_id` ; il n'en reste aucune, que le secret soit passé par variable ou par fichier.
 - **Mesure** (recherche des marqueurs dans `/proc/<pid>/mem`) : après un chiffrement, un déchiffrement, un enveloppement et un désenveloppement, la 0.1.2 laissait 5 à 6 copies du texte et 7 à 8 de la clé ; cette version en laisse au plus 1 du texte et 2 de la clé (en Base64), et aucune après quelques requêtes supplémentaires (la 0.1.2 gardait encore 1 à 2 copies de la clé).
 - **Swap** : le compose fixe `memswap_limit` à la limite mémoire, ce qui interdit toute écriture de la mémoire du processus sur disque.
 - **AES matériel** : sans AES-NI (ou extensions ARMv8), l'AES logiciel de Go n'est pas en temps constant ; le service l'annonce au démarrage (`software_aes`).
@@ -184,6 +185,45 @@ Un clair, une clé de données ou une clé privée ne vit que dans des tampons `
 - **Isolation du Daemon Docker (`/var/run/docker.sock`)** : Le conteneur ne monte aucun composant de l'hôte, ne possède aucun droit d'accès au socket Docker du serveur hôte, et est strictement confiné dans son namespace.
 
 ---
+
+## 6c. Coffres de Clés : Indépendance vis-à-vis du KMS
+
+La paire KEM maîtresse est la seule donnée dont la perte rend **tous** les chiffrés illisibles. Le service la confie à un coffre choisi par `KEYSTORE`, sans dépendre d'aucun fournisseur :
+
+| `KEYSTORE` | Coffre | Remarques |
+| :--- | :--- | :--- |
+| `none` (défaut) | Aucun : paire éphémère en RAM | Données illisibles après redémarrage. Avertissement `keystore_disabled` en production. |
+| `infisical` | Infisical (Universal Auth) | `INFISICAL_ENABLED=true` reste accepté. |
+| `openbao` | OpenBao, moteur KV v2 (compatible HashiCorp Vault) | Open source (MPL-2.0), auto-hébergeable. Recommandé pour la conservation longue. |
+
+**Garanties communes à tous les coffres** (contrat `keystore.Backend`) :
+- **Format unique** : la paire est stockée sous le même bundle JSON versionné (`format_version`, `algorithm`, `public_key`, `private_key`, `created_at`, `checksum`) quel que soit le coffre. Rien n'est propre à un fournisseur.
+- **Jamais d'écrasement** : une paire existante n'est jamais remplacée par une nouvelle.
+- **Jamais de régénération silencieuse** : une paire supprimée, corrompue ou inaccessible bloque le démarrage. Seul un coffre qui n'a *jamais* contenu de paire déclenche la génération.
+- **Migration sans perte** : `pq-server -migrate-keys` copie la paire d'un coffre vers un autre, relit et compare. Elle est rejouable, refuse d'écraser une autre paire et **ne supprime jamais la source**.
+
+```bash
+# Passer d'Infisical à OpenBao (les deux configurés dans l'environnement)
+docker compose run --rm -e KEYSTORE_MIGRATE_FROM=infisical -e KEYSTORE=openbao \
+  pq-crypto-service -migrate-keys
+# Puis démarrer avec KEYSTORE=openbao, vérifier le kid (identique) et le déchiffrement
+# des données existantes, et seulement ensuite retirer l'ancien coffre.
+```
+
+**OpenBao, conservation longue** :
+- La paire est écrite en *check-and-set* 0 (création seule). Le service pose ensuite `cas_required=true` (un `bao kv put` sans `-cas` est refusé, y compris pour un administrateur) et `delete_version_after=0s` (aucune expiration).
+- Une suppression (`bao kv delete`) bloque le démarrage au lieu de générer une nouvelle paire ; `bao kv undelete -versions=N` la restaure à l'identique.
+- Politique minimale du service, qui ne lui permet ni de remplacer ni de supprimer la paire :
+
+```hcl
+path "secret/data/pq-crypto-service/keypair"     { capabilities = ["create", "read"] }
+path "secret/metadata/pq-crypto-service/keypair" { capabilities = ["create", "read", "update"] }
+```
+
+- **Jeton** : préférer AppRole, avec un `token_ttl` court (quelques minutes). Le jeton obtenu au démarrage est **révoqué** dès la paire chargée (`openbao_token_revoked`). Un jeton statique (`OPENBAO_TOKEN`) n'est pas révoqué, puisqu'il resservira : le limiter à cette politique et le renouveler régulièrement. Dans les deux cas, sa valeur ne reste pas en mémoire (voir §6b).
+- Sauvegarder le stockage d'OpenBao (`bao operator raft snapshot save`) et conserver les clés de descellement hors ligne : un coffre scellé dont on a perdu les clés est une perte de données.
+
+**Ajouter un coffre** (KMS de cloud, autre gestionnaire) : écrire un paquet qui appelle `keystore.Register` dans son `init()`, lit sa configuration via `keystore.Settings` et respecte le contrat ci-dessus, puis l'importer dans `cmd/server/keystores.go`. Ni la configuration générale, ni le moteur, ni l'API ne changent. Un KMS qui ne stocke pas de secrets (Google Cloud KMS, AWS KMS) s'intègre en chiffrant le bundle sous sa clé et en stockant le résultat dans un coffre de secrets (Secret Manager…). La paire reste alors récupérable tant que la clé KMS existe : prévoir sa protection contre la destruction.
 
 ## 7. Exemples d'Intégration Client (Envelope KMS Recommandée)
 
@@ -297,6 +337,15 @@ Le fichier `.env` permet d'ajuster le comportement du conteneur :
 | `AUDIT_LOG` | `true` | Une ligne `audit` par opération cryptographique : opération, client, `kid`, issue, identifiant de corrélation. Jamais de donnée. |
 | `MAX_CONNECTIONS` | `1024` | Connexions simultanées admises par écouteur ; au-delà, l'acceptation attend (0 = illimité). |
 | `SOCKET_ALLOWED_UIDS` | *(vide)* | UID des processus admis sur le socket Unix, attestés par le noyau (`SO_PEERCRED`, Linux) ; les autres connexions sont fermées avant toute lecture. L'UID sert d'identité. |
+| `KEYSTORE` | `none` | Coffre de la paire : `none` (éphémère), `infisical`, `openbao` (voir §6c). |
+| `KEYSTORE_MIGRATE_FROM` | *(vide)* | Coffre source de `pq-server -migrate-keys` (la cible est `KEYSTORE`). |
+| `OPENBAO_ADDR` | `https://openbao:8200` | URL d'OpenBao ; **`https://` obligatoire en production**. TLS 1.3, sans proxy ni redirection. |
+| `OPENBAO_AUTH` | *(déduit)* | `approle` (si `OPENBAO_ROLE_ID` est défini) ou `token`. |
+| `OPENBAO_ROLE_ID` / `OPENBAO_SECRET_ID` | *(vide)* | Identifiants AppRole (`OPENBAO_SECRET_ID_FILE` accepté). |
+| `OPENBAO_TOKEN` | *(vide)* | Jeton (`OPENBAO_TOKEN_FILE` accepté). |
+| `OPENBAO_CA_FILE` / `OPENBAO_NAMESPACE` | *(vide)* | Autorité (PEM) de l'instance ; espace de noms. |
+| `OPENBAO_KV_MOUNT` / `OPENBAO_SECRET_PATH` | `secret` / `pq-crypto-service/keypair` | Montage KV v2 et chemin de la paire. |
+| `OPENBAO_APPROLE_MOUNT` | `approle` | Montage de la méthode AppRole. |
 | `INFISICAL_CA_FILE` | *(vide)* | Autorité (PEM) de l'instance Infisical ; vide : CA du système. Le transport exige TLS 1.3. |
 | `MAX_PAYLOAD_BYTES` | `10485760` (10 Mio) | Taille maximale du corps des requêtes (à relever pour de plus gros volumes, avec `MEM_LIMIT`). `/decrypt` accepte 1,5 × cette valeur + 64 Kio (voir §4b). Garder `MAX_CONCURRENT_REQUESTS × 4 × MAX_PAYLOAD_BYTES` sous `MEM_LIMIT`. |
 | `GOMEMLIMIT` | *(85 % de la limite du conteneur)* | Cible du ramasse-miettes Go ; calculée automatiquement si absente. |

@@ -166,31 +166,26 @@ func TestConfig_ValidationErrors(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "Infisical en HTTP interdit en production",
+			name: "Coffre de clés inconnu refusé",
 			mutate: func(c *Config) {
-				c.Environment = "production"
-				c.InfisicalEnabled = true
-				c.InfisicalURL = "http://infisical:8080"
+				c.Keystore = "coffre-inexistant"
 			},
 			wantErr: true,
 		},
 		{
-			name: "Infisical en HTTPS accepté en production",
+			name: "Coffre de clés enregistré accepté",
 			mutate: func(c *Config) {
-				c.Environment = "production"
-				c.InfisicalEnabled = true
-				c.InfisicalURL = "https://infisical.example"
+				c.Keystore = testKeystoreName
 			},
 			wantErr: false,
 		},
 		{
-			name: "Infisical en HTTP toléré en développement",
+			name: "Migration vers le même coffre refusée",
 			mutate: func(c *Config) {
-				c.Environment = "development"
-				c.InfisicalEnabled = true
-				c.InfisicalURL = "http://infisical:8080"
+				c.Keystore = testKeystoreName
+				c.KeystoreMigrateFrom = testKeystoreName
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "MockMode autorisé en test",
@@ -380,6 +375,14 @@ func TestConfig_ComposeEnvConsistency(t *testing.T) {
 		"SOCKET_MODE",
 		"SOCKET_GID",
 		"DISABLE_TCP",
+		"KEYSTORE",
+		"KEYSTORE_MIGRATE_FROM",
+		"OPENBAO_ADDR",
+		"OPENBAO_ROLE_ID",
+		"OPENBAO_SECRET_ID",
+		"OPENBAO_TOKEN",
+		"OPENBAO_KV_MOUNT",
+		"OPENBAO_SECRET_PATH",
 		"INFISICAL_ENABLED",
 		"INFISICAL_URL",
 		"INFISICAL_CLIENT_ID",

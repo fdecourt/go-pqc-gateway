@@ -52,7 +52,7 @@ FROM scratch
 # de déclarer deux fois la même information.
 LABEL org.opencontainers.image.title="pq-crypto-service" \
       org.opencontainers.image.description="Micro-service de chiffrement post-quantique ML-KEM + AES-256-GCM" \
-      org.opencontainers.image.version="0.3.0" \
+      org.opencontainers.image.version="0.4.0" \
       org.opencontainers.image.licenses="BUSL-1.1" \
       org.opencontainers.image.source="https://github.com/fdecourt/go-pqc-gateway" \
       org.opencontainers.image.authors="fdecourt"

@@ -59,7 +59,7 @@ docker-test:
 	docker run --rm -e CGO_ENABLED=0 -e GOEXPERIMENT=$(SECRET_EXPERIMENT) -v "$(PWD)":/app -w /app $(GO_IMAGE) sh -c "go test -tags mock ./... && go test ./..."
 
 DOCKER_USER ?= fdecourt
-IMAGE_TAG ?= 0.3.0
+IMAGE_TAG ?= 0.4.0
 
 docker-push:
 	docker tag pq-crypto-service:$(IMAGE_TAG) $(DOCKER_USER)/pq-crypto-service:$(IMAGE_TAG)

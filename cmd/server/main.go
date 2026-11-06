@@ -18,8 +18,6 @@ import (
 	"pq-crypto-service/internal/api"
 	"pq-crypto-service/internal/config"
 	"pq-crypto-service/internal/crypto"
-	"pq-crypto-service/internal/infisical"
-	"pq-crypto-service/internal/keystore"
 )
 
 const (
@@ -33,6 +31,7 @@ const (
 
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "Exécute un healthcheck HTTP local et quitte avec 0 (succès) ou 1 (échec)")
+	migrateKeys := flag.Bool("migrate-keys", false, "Copie la paire de KEYSTORE_MIGRATE_FROM vers KEYSTORE, vérifie, puis quitte")
 	flag.Parse()
 
 	cfg, err := config.LoadConfig()
@@ -44,7 +43,7 @@ func main() {
 	}
 	// Les secrets lus dans l'environnement sont effacés du bloc initial du processus, que
 	// os.Unsetenv ne touche pas (il resterait lisible dans /proc/<pid>/environ).
-	if err := scrubEnviron(config.EnvironmentSecrets...); err != nil {
+	if err := scrubEnviron(config.EnvironmentSecrets()...); err != nil {
 		slog.Warn("environ_scrub_failed", slog.String("error", err.Error()))
 	}
 
@@ -54,6 +53,14 @@ func main() {
 	}
 
 	setupLogging(cfg)
+	if *migrateKeys {
+		err := runKeyMigration(cfg)
+		cfg.WipeSecrets()
+		if err != nil {
+			fatal("migration des clés", err)
+		}
+		return
+	}
 	if err := run(cfg); err != nil {
 		fatal("arrêt sur erreur", err)
 	}
@@ -96,7 +103,7 @@ func run(cfg *config.Config) error {
 	}
 
 	engine, err := buildEngine(cfg)
-	cfg.WipeSecrets() // le client_secret Infisical ne sert qu'au démarrage
+	cfg.WipeSecrets() // les identifiants du coffre ne servent qu'au démarrage
 	if err != nil {
 		return fmt.Errorf("initialisation du moteur cryptographique: %w", err)
 	}
@@ -117,37 +124,24 @@ func run(cfg *config.Config) error {
 
 // buildEngine instancie le moteur, adossé à Infisical si celui-ci est activé.
 func buildEngine(cfg *config.Config) (crypto.Engine, error) {
-	var store keystore.Store
-	if cfg.InfisicalEnabled {
-		slog.Info("infisical_enabled",
-			slog.String("url", cfg.InfisicalURL),
-			slog.String("project_id", cfg.InfisicalProjectID),
-			slog.String("environment", cfg.InfisicalEnv))
-		store = infisical.NewClient(infisical.Options{
-			URL:          cfg.InfisicalURL,
-			ClientID:     cfg.InfisicalClientID,
-			ClientSecret: cfg.InfisicalClientSecret,
-			CAFile:       cfg.InfisicalCAFile,
-			ProjectID:    cfg.InfisicalProjectID,
-			Environment:  cfg.InfisicalEnv,
-			BundleName:   cfg.InfisicalSecretBundleName,
-			Algorithm:    cfg.Algorithm,
-
-			LegacyPubKeyName:  cfg.InfisicalSecretPubKeyName,
-			LegacyPrivKeyName: cfg.InfisicalSecretPrivKeyName,
-		})
+	store, err := openKeystore(cfg, cfg.Keystore)
+	if err != nil {
+		return nil, err
+	}
+	if store == nil && cfg.IsProduction() && !cfg.MockMode {
+		slog.Warn("keystore_disabled", slog.String("detail",
+			"aucun coffre (KEYSTORE) : paire éphémère, toute donnée chiffrée deviendra illisible au redémarrage"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), engineInitTimeout)
 	defer cancel()
-	if closer, ok := store.(interface{ Close() }); ok {
-		defer closer.Close() // efface le client_secret et oublie le jeton : plus aucun appel au coffre ensuite
-	}
-	return crypto.BuildEngine(ctx, crypto.EngineOptions{
+	engine, err := crypto.BuildEngine(ctx, crypto.EngineOptions{
 		Algorithm: cfg.Algorithm,
 		MockMode:  cfg.MockMode,
 		AllowMock: !cfg.IsProduction(),
 	}, store)
+	closeKeystore(store) // plus aucun appel au coffre ensuite : identifiants effacés, jeton révoqué
+	return engine, err
 }
 
 // newHTTPServer configure les délais (anti-Slowloris) et la taille maximale des en-têtes.

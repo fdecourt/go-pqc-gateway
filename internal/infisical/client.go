@@ -1,25 +1,14 @@
 package infisical
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
-	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -30,7 +19,7 @@ import (
 
 var (
 	ErrSecretNotFound  = keystore.ErrSecretNotFound
-	ErrCorruptedBundle = errors.New("bundle de clés Infisical corrompu ou invalide")
+	ErrCorruptedBundle = keystore.ErrCorruptedBundle
 	ErrAuthFailed      = errors.New("échec d'authentification Infisical Universal Auth")
 	// ErrLegacyLayout signale une paire stockée dans l'ancien format scindé (deux secrets),
 	// qui n'est plus lu : générer une nouvelle paire rendrait les données existantes illisibles.
@@ -38,43 +27,8 @@ var (
 		"la migrer vers le bundle atomique (voir CHANGELOG 0.2.0)", keystore.ErrBootstrapForbidden)
 )
 
-const (
-	// maxResponseBytes borne une réponse réussie (un bundle ML-KEM-1024 hybride fait ~9 Kio).
-	maxResponseBytes = 1 << 20
-	// maxErrorBodyBytes borne le corps d'erreur recopié dans le message, puis dans les logs.
-	maxErrorBodyBytes = 4 << 10
-	// httpTimeout borne chaque appel à Infisical.
-	httpTimeout = 10 * time.Second
-)
-
-// KeypairBundle documente le format (version 1) du secret atomique qui contient la paire.
-// Le client ne l'utilise pas pour lire la clé privée : voir bundleWire.
-type KeypairBundle struct {
-	FormatVersion int    `json:"format_version"`
-	Algorithm     string `json:"algorithm"`
-	PublicKey     string `json:"public_key"`
-	PrivateKey    string `json:"private_key"`
-	CreatedAt     string `json:"created_at"`
-	Checksum      string `json:"checksum"`
-}
-
-// bundleWire lit un KeypairBundle sans jamais placer la clé privée dans une chaîne Go.
-type bundleWire struct {
-	FormatVersion int         `json:"format_version"`
-	Algorithm     string      `json:"algorithm"`
-	PublicKey     string      `json:"public_key"`
-	PrivateKey    secmem.Text `json:"private_key"`
-	Checksum      string      `json:"checksum"`
-}
-
-// keypairChecksum renvoie SHA-256(pubB64 ":" privB64), qui détecte une corruption du bundle.
-func keypairChecksum(pubB64 string, privB64 []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte(pubB64))
-	h.Write([]byte{':'})
-	h.Write(privB64)
-	return h.Sum(nil)
-}
+// KeypairBundle documente le format du secret atomique (commun à tous les coffres).
+type KeypairBundle = keystore.KeypairBundle
 
 // Options regroupe les seuls paramètres dont le client Infisical a besoin.
 // Le paquet ne dépend ainsi pas de la configuration globale du service.
@@ -108,21 +62,7 @@ type Client struct {
 // Le client garde sa propre copie du secret : l'appelant peut effacer la sienne.
 func NewClient(opts Options) *Client {
 	opts.ClientSecret = append([]byte(nil), opts.ClientSecret...)
-	transport := &http.Transport{
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS13},
-		TLSHandshakeTimeout: httpTimeout,
-		Proxy:               nil, // jamais de proxy d'environnement entre le service et son coffre
-	}
-	return &Client{
-		opts: opts,
-		httpClient: &http.Client{
-			Timeout:   httpTimeout,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-	}
+	return &Client{opts: opts, httpClient: keystore.NewHTTPClient()}
 }
 
 // Close efface le client_secret et oublie le jeton : le client est inutilisable ensuite.
@@ -138,19 +78,7 @@ func (c *Client) Close() {
 
 // loadCA charge l'autorité de CAFile dans le transport ; sans CAFile, la CA du système s'applique.
 func (c *Client) loadCA() error {
-	if c.opts.CAFile == "" {
-		return nil
-	}
-	pem, err := os.ReadFile(filepath.Clean(c.opts.CAFile))
-	if err != nil {
-		return fmt.Errorf("lecture de INFISICAL_CA_FILE: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return errors.New("INFISICAL_CA_FILE ne contient aucun certificat PEM valide")
-	}
-	c.httpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = pool
-	return nil
+	return keystore.LoadCA(c.httpClient, c.opts.CAFile, "INFISICAL_CA_FILE")
 }
 
 const DefaultBundleName = "PQ_KEM_KEYPAIR"
@@ -246,39 +174,15 @@ func (c *Client) endpoint(relPath string, query url.Values) string {
 // send exécute une requête et renvoie le corps de la réponse dans un tampon possédé, borné à
 // maxResponseBytes, que l'appelant efface. reqBody appartient à l'appelant (effacé par lui).
 func (c *Client) send(ctx context.Context, method, target, token string, reqBody []byte) ([]byte, int, error) {
-	if target == "" {
-		return nil, 0, errors.New("URL Infisical invalide")
-	}
-	var body io.Reader
-	if reqBody != nil {
-		body = bytes.NewReader(reqBody)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, target, body)
-	if err != nil {
-		return nil, 0, err
-	}
+	var header http.Header
 	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		header = http.Header{"Authorization": {"Bearer " + token}}
 	}
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	respBody, err := secmem.ReadAll(resp.Body, resp.ContentLength, maxResponseBytes)
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("lecture de la réponse Infisical (HTTP %d): %w", resp.StatusCode, err)
-	}
-	return respBody, resp.StatusCode, nil
+	return keystore.Send(ctx, c.httpClient, method, target, header, reqBody)
 }
 
 // errorExcerpt renvoie le début d'un corps d'erreur, borné, pour le message d'erreur.
-func errorExcerpt(body []byte) string {
-	return strings.ToValidUTF8(string(body[:min(len(body), maxErrorBodyBytes)]), "?")
-}
+func errorExcerpt(body []byte) string { return keystore.ErrorExcerpt(body) }
 
 // call exécute une requête authentifiée et renvoie le corps d'une réponse 200/201.
 func (c *Client) call(ctx context.Context, method, relPath string, query url.Values, reqBody []byte) ([]byte, error) {
@@ -370,33 +274,7 @@ func (c *Client) FetchKeys(ctx context.Context) ([]byte, []byte, error) {
 
 // parseBundle décode et vérifie un bundle ; sk est décodée directement dans un tampon possédé.
 func (c *Client) parseBundle(raw []byte) (pk, sk []byte, err error) {
-	var b bundleWire
-	defer b.PrivateKey.Wipe()
-	if err := json.Unmarshal(raw, &b); err != nil {
-		return nil, nil, fmt.Errorf("%w: JSON illisible", ErrCorruptedBundle)
-	}
-	if b.FormatVersion != 1 {
-		return nil, nil, fmt.Errorf("%w: version %d", ErrCorruptedBundle, b.FormatVersion)
-	}
-	if b.Algorithm != "" && c.opts.Algorithm != "" && !strings.EqualFold(b.Algorithm, c.opts.Algorithm) {
-		return nil, nil, fmt.Errorf("%w: algo '%s' incompatible avec cfg '%s'", ErrCorruptedBundle, b.Algorithm, c.opts.Algorithm)
-	}
-	want, err := hex.DecodeString(b.Checksum)
-	if err != nil || subtle.ConstantTimeCompare(want, keypairChecksum(b.PublicKey, b.PrivateKey)) != 1 {
-		return nil, nil, fmt.Errorf("%w: corruption détectée (checksum mismatch)", ErrCorruptedBundle)
-	}
-
-	pk, err = base64.StdEncoding.DecodeString(b.PublicKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: clé publique Base64 invalide", ErrCorruptedBundle)
-	}
-	sk = make([]byte, base64.StdEncoding.DecodedLen(len(b.PrivateKey)))
-	n, err := base64.StdEncoding.Decode(sk, b.PrivateKey)
-	if err != nil {
-		secmem.Wipe(sk)
-		return nil, nil, fmt.Errorf("%w: clé privée Base64 invalide", ErrCorruptedBundle)
-	}
-	return pk, sk[:n], nil
+	return keystore.ParseBundle(raw, c.opts.Algorithm)
 }
 
 // checkNoLegacyLayout renvoie ErrLegacyLayout si un secret de l'ancien format scindé existe.
@@ -421,19 +299,7 @@ func (c *Client) checkNoLegacyLayout(ctx context.Context) error {
 // StoreKeys écrit la paire dans le bundle atomique. La clé privée n'est encodée que dans des
 // tampons effaçables (Base64, JSON du bundle, corps de la requête), effacés au retour.
 func (c *Client) StoreKeys(ctx context.Context, pkBytes, skBytes []byte) error {
-	pubB64 := base64.StdEncoding.EncodeToString(pkBytes)
-	privB64 := secmem.NewBuffer(base64.StdEncoding.EncodedLen(len(skBytes)))
-	defer privB64.Wipe()
-	privB64.WriteBase64(skBytes)
-
-	o := secmem.NewJSONObject(256 + len(pubB64) + privB64.Len() + len(c.opts.Algorithm))
-	o.Int("format_version", 1)
-	o.String("algorithm", c.opts.Algorithm)
-	o.String("public_key", pubB64)
-	o.Text("private_key", privB64.Bytes())
-	o.String("created_at", time.Now().UTC().Format(time.RFC3339))
-	o.String("checksum", hex.EncodeToString(keypairChecksum(pubB64, privB64.Bytes())))
-	bundle := o.Finish()
+	bundle := keystore.EncodeBundle(c.opts.Algorithm, pkBytes, skBytes, time.Now())
 	defer bundle.Wipe()
 
 	if err := c.setSecret(ctx, c.bundleName(), bundle.Bytes()); err != nil {

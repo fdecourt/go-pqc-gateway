@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -280,4 +282,21 @@ func TestReadAll_ReservesTailSlack(t *testing.T) {
 			t.Fatalf("hint=%d: err=%v, marge=%d", hint, err, cap(got)-len(got))
 		}
 	}
+}
+
+// TestWipeString_ClearsEnvCopy vérifie que la valeur lue dans l'environnement est effacée sur
+// place : c'est la copie que le runtime garde, pas une copie locale.
+func TestWipeString_ClearsEnvCopy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// Ailleurs (Windows), os.LookupEnv renvoie une copie neuve à chaque appel : il n'y a
+		// pas de copie du runtime à effacer, et le test n'a pas d'objet.
+		t.Skip("copie de l'environnement propre au runtime Linux")
+	}
+	t.Setenv("SECMEM_WIPE_TEST", "valeur-secrete")
+	v, _ := os.LookupEnv("SECMEM_WIPE_TEST")
+	WipeString(v)
+	if again, _ := os.LookupEnv("SECMEM_WIPE_TEST"); again != strings.Repeat("\x00", len("valeur-secrete")) {
+		t.Fatalf("copie de l'environnement non effacée : %q", again)
+	}
+	WipeString("") // sans effet
 }
