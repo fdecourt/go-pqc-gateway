@@ -1,0 +1,105 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        experiment: ["", "runtimesecret"]
+        tags: ["", "mock"]
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      GOEXPERIMENT: ${{ matrix.experiment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go mod verify
+      - run: go vet -tags "${{ matrix.tags }}" ./...
+      - run: go test -race -count=1 -tags "${{ matrix.tags }}" ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -run '^$' -fuzz '^FuzzDecodeStrict$' -fuzztime 60s ./internal/secmem/
+      - run: go test -run '^$' -fuzz '^FuzzWriteJSONString$' -fuzztime 30s ./internal/secmem/
+      - run: go test -run '^$' -fuzz '^FuzzParseBinaryEnvelope$' -fuzztime 30s ./internal/api/
+      - run: go test -run '^$' -fuzz '^FuzzDecodeDecryptRequest$' -fuzztime 30s ./internal/api/
+
+  security:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.9 -exclude-generated -severity medium ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+  image:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build (tests inclus dans l'image)
+        run: docker build --pull=false -t pq-crypto-service:ci .
+      - name: smoke test du conteneur (/health, /metrics, corrélation, refus sans jeton)
+        run: |
+          set -eu
+          TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
+          docker run -d --name pqc --read-only --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:18080:8080 -e ALLOW_INSECURE_TCP=true -e AUTH_TOKENS="ci:$TOKEN" pq-crypto-service:ci
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:18080/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:18080/health | grep -q '"status":"healthy"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/public-key)" = 401
+          curl -sf -H "Authorization: Bearer $TOKEN" http://127.0.0.1:18080/metrics | grep -q '^pqc_build_info'
+          curl -s -D - -o /dev/null -H "Authorization: Bearer $TOKEN" http://127.0.0.1:18080/public-key | grep -qi '^x-correlation-id:'
+          ENV=$(curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"plaintext":"ci"}' http://127.0.0.1:18080/encrypt)
+          curl -sf -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$ENV" http://127.0.0.1:18080/decrypt | grep -q '"plaintext":"ci"'
+          docker exec pqc /usr/local/bin/pq-server -healthcheck
+          docker logs pqc | grep -q '"msg":"audit"'
+          docker rm -f pqc
+      - name: govulncheck sur le binaire livré
+        run: |
+          docker create --name extract pq-crypto-service:ci
+          docker cp extract:/usr/local/bin/pq-server ./pq-server
+          docker rm extract
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -mode=binary ./pq-server
+      - name: image scan
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: pq-crypto-service:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0.20.4
+        with:
+          image: pq-crypto-service:ci
+          format: spdx-json
+          artifact-name: sbom-pq-crypto-service.spdx.json

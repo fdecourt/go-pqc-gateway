@@ -1,0 +1,4 @@
+go test fuzz v1
+string("0")
+string("0\xc3,0\xfd,a:00:0\xfd,0:\xdf")
+bool(true)

@@ -1,0 +1,4 @@
+go test fuzz v1
+string("0")
+string("AAA:AAAA,AA:AAAAA,AAA:AAAA:AAAAA,AAA:AAA")
+bool(true)

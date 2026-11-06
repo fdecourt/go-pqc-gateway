@@ -1,0 +1,106 @@
+services:
+  pq-crypto-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-pq-crypto-service}:${IMAGE_TAG:-0.3.0}
+    container_name: ${CONTAINER_NAME:-pq-crypto-microservice}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    ports:
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-8085}:${CONTAINER_PORT:-8080}"
+    environment:
+      # Configuration Générale Serveur
+      - LISTEN_ADDRESS=${LISTEN_ADDRESS:-0.0.0.0}
+      # Sécurité du transport TCP. En production, une écoute hors loopback sans TLS est refusée
+      # au démarrage. Ce compose l'autorise explicitement : le port n'est publié que sur
+      # HOST_BIND_ADDRESS (127.0.0.1 par défaut) et le réseau bridge est privé. Dès que le
+      # gateway est joignable depuis d'autres machines, configurer TLS (ou mTLS) et repasser
+      # ALLOW_INSECURE_TCP à false.
+      - ALLOW_INSECURE_TCP=${ALLOW_INSECURE_TCP:-true}
+      - TLS_CERT_FILE=${TLS_CERT_FILE:-}
+      - TLS_KEY_FILE=${TLS_KEY_FILE:-}
+      - TLS_CLIENT_CA_FILE=${TLS_CLIENT_CA_FILE:-}
+      - PORT=${CONTAINER_PORT:-8080}
+      - ALGORITHM=${ALGORITHM:-ML-KEM-1024}
+      - MOCK_MODE=${MOCK_MODE:-false}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      # Proxys dont X-Forwarded-For est cru (CIDR, séparés par des virgules). Vide : jamais.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+      - TLS_MIN_VERSION=${TLS_MIN_VERSION:-1.3}
+      - TLS_CLIENT_ALLOWED_NAMES=${TLS_CLIENT_ALLOWED_NAMES:-}
+      # Authentification applicative : jetons « nom:secret,… » (ou AUTH_TOKENS_FILE), liaison
+      # de chaque enveloppe à l'identité du client, journal d'audit, limite de connexions.
+      - AUTH_TOKENS=${AUTH_TOKENS:-}
+      - AUTH_TOKENS_FILE=${AUTH_TOKENS_FILE:-}
+      - BIND_CLIENT_IDENTITY=${BIND_CLIENT_IDENTITY:-false}
+      - AUDIT_LOG=${AUDIT_LOG:-true}
+      - MAX_CONNECTIONS=${MAX_CONNECTIONS:-1024}
+      - READ_TIMEOUT_SECONDS=${READ_TIMEOUT_SECONDS:-10}
+      - WRITE_TIMEOUT_SECONDS=${WRITE_TIMEOUT_SECONDS:-10}
+      - IDLE_TIMEOUT_SECONDS=${IDLE_TIMEOUT_SECONDS:-60}
+      # Garde-fous mémoire : MAX_CONCURRENT_REQUESTS × 4 copies × MAX_PAYLOAD_BYTES doit rester
+      # sous MEM_LIMIT (mesuré : pic de ~500 Mio pour 16 requêtes de 10 Mio). Sans GOMEMLIMIT, le
+      # service vise 85 % de la limite du conteneur ; GOMEMLIMIT=<valeur> l'impose explicitement.
+      - MAX_PAYLOAD_BYTES=${MAX_PAYLOAD_BYTES:-10485760}
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-16}
+      - ACCESS_LOG=${ACCESS_LOG:-false}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-500}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-1000}
+
+      # Transport IPC Unix Domain Socket (Optionnel : écoute simultanée ou exclusive par socket Unix)
+      - SOCKET_PATH=${SOCKET_PATH:-}
+      - SOCKET_MODE=${SOCKET_MODE:-0660}
+      - SOCKET_GID=${SOCKET_GID:--1}
+      - SOCKET_ALLOWED_UIDS=${SOCKET_ALLOWED_UIDS:-}
+      - DISABLE_TCP=${DISABLE_TCP:-false}
+
+      # Intégration Infisical (Optionnelle - RAM Only, zéro persistance disque)
+      - INFISICAL_ENABLED=${INFISICAL_ENABLED:-false}
+      - INFISICAL_URL=${INFISICAL_URL:-https://infisical:8443}
+      - INFISICAL_CLIENT_ID=${INFISICAL_CLIENT_ID:-}
+      - INFISICAL_CLIENT_SECRET=${INFISICAL_CLIENT_SECRET:-}
+      # Autorité de certification de l'instance Infisical (PEM) ; vide : CA du système
+      - INFISICAL_CA_FILE=${INFISICAL_CA_FILE:-}
+      - INFISICAL_PROJECT_ID=${INFISICAL_PROJECT_ID:-}
+      - INFISICAL_ENV=${INFISICAL_ENV:-prod}
+      - INFISICAL_SECRET_PUBKEY_NAME=${INFISICAL_SECRET_PUBKEY_NAME:-PQ_KEM_PUBLIC_KEY}
+      - INFISICAL_SECRET_PRIVKEY_NAME=${INFISICAL_SECRET_PRIVKEY_NAME:-PQ_KEM_PRIVATE_KEY}
+      - INFISICAL_SECRET_BUNDLE_NAME=${INFISICAL_SECRET_BUNDLE_NAME:-PQ_KEM_KEYPAIR}
+
+    # Durcissement de sécurité du conteneur (CIS Benchmark)
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:${NO_NEW_PRIVILEGES:-true}
+    read_only: ${READ_ONLY_ROOTFS:-true}
+    tmpfs:
+      - ${TMPFS_MOUNT:-/tmp:rw,noexec,nosuid,nodev,size=16m}
+    # Pas de swap : la mémoire du processus (clés, clairs en cours de traitement) ne doit
+    # jamais être écrite sur disque. memswap_limit égal à la limite mémoire l'interdit.
+    memswap_limit: ${MEM_LIMIT:-1G}
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/pq-server", "-healthcheck"]
+      interval: ${HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${HEALTHCHECK_TIMEOUT:-3s}
+      retries: ${HEALTHCHECK_RETRIES:-3}
+      start_period: ${HEALTHCHECK_START_PERIOD:-3s}
+    deploy:
+      resources:
+        limits:
+          cpus: '${CPU_LIMIT:-1.5}'
+          memory: ${MEM_LIMIT:-1G}
+          pids: ${PIDS_LIMIT:-100}
+        reservations:
+          cpus: '${CPU_RESERVATION:-0.2}'
+          memory: ${MEM_RESERVATION:-64M}
+    networks:
+      - pq-internal-net
+
+networks:
+  pq-internal-net:
+    name: ${NETWORK_NAME:-pq-internal-net}
+    driver: bridge

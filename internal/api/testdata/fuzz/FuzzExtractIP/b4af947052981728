@@ -1,0 +1,4 @@
+go test fuzz v1
+string("El I\xf4\xbe\x03ѐ\x85\xc1F2")
+string("::%: ")
+bool(true)

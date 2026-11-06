@@ -1,0 +1,4 @@
+go test fuzz v1
+string("0")
+string("0\xbc,\xa60\xe3,\xd7\xef,0\x9b\x8b\xc3,\x8a\xb2\xf9")
+bool(true)
